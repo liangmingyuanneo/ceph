@@ -1398,7 +1398,6 @@ public:
                                                                               keep separate instance entry for the delete markers */
 
     if (ret < 0) {
-      CLS_LOG(0, "ERROR: read_key_entry() idx=%s ret=%d", instance_idx.c_str(), ret);
       return ret;
     }
     initialized = true;
@@ -1747,6 +1746,7 @@ static int rgw_bucket_link_olh(cls_method_context_t hctx, bufferlist *in, buffer
     ret = 0;
   }
   if (ret < 0) {
+    CLS_LOG(0, "ERROR: obj.init() returned ret=%d", ret);
     return ret;
   }
 
@@ -1799,6 +1799,9 @@ static int rgw_bucket_link_olh(cls_method_context_t hctx, bufferlist *in, buffer
     ret = other_obj.init(!op.delete_marker); /* try reading the other
 					      * null versioned
 					      * entry */
+    if (ret < 0 && ret != -ENOENT) {
+      CLS_LOG(0, "ERROR: obj.init() returned ret=%d", ret);
+    }
     existed = (ret >= 0 && !other_obj.is_delete_marker());
     if (ret >= 0 && other_obj.is_delete_marker() != op.delete_marker) {
       ret = other_obj.unlink_list_entry();
