@@ -429,6 +429,24 @@ void rgw_cls_bi_entry::generate_test_instances(list<rgw_cls_bi_entry*>& o)
   o.push_back(new rgw_cls_bi_entry);
 }
 
+void rgw_reshard_log_entry::dump(Formatter *f) const {
+  encode_json("key", key, f);
+  encode_json("del", del, f);
+}
+
+void rgw_reshard_log_entry::decode_json(JSONObj *obj) {
+  JSONDecoder::decode_json("key", key, obj);
+  JSONDecoder::decode_json("del", del, obj);
+}
+
+void rgw_reshard_log_entry::generate_test_instances(list<rgw_reshard_log_entry*>& ls)
+{
+  ls.push_back(new rgw_reshard_log_entry);
+  ls.push_back(new rgw_reshard_log_entry);
+  ls.back()->key.name = "key.name";
+  ls.back()->key.instance = "key.instance";
+}
+
 void rgw_bucket_olh_entry::dump(Formatter *f) const
 {
   encode_json("key", key, f);
@@ -519,6 +537,7 @@ void rgw_bucket_olh_log_entry::decode_json(JSONObj *obj)
   JSONDecoder::decode_json("key", key, obj);
   JSONDecoder::decode_json("delete_marker", delete_marker, obj);
 }
+
 void rgw_bi_log_entry::decode_json(JSONObj *obj)
 {
   JSONDecoder::decode_json("op_id", id, obj);
