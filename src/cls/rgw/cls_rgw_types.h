@@ -592,6 +592,35 @@ struct rgw_bucket_olh_entry {
 };
 WRITE_CLASS_ENCODER(rgw_bucket_olh_entry)
 
+// duplicated entry written with index in reshard logrecord state
+struct rgw_reshard_log_entry {
+  cls_rgw_obj_key key;
+  bool del;
+  ceph::buffer::list data;
+  
+  rgw_reshard_log_entry() : del(false) {}
+
+  void encode(ceph::buffer::list &bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(key, bl);
+    encode(del, bl);
+    encode(data, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::buffer::list::const_iterator &bl) {
+    DECODE_START(1, bl);
+    decode(key, bl);
+    decode(del, bl);
+    decode(data, bl);
+    DECODE_FINISH(bl);
+  }
+  void dump(Formatter *f) const;
+  void decode_json(JSONObj *obj);
+  static void generate_test_instances(std::list<rgw_reshard_log_entry*>& o);
+};
+WRITE_CLASS_ENCODER(rgw_reshard_log_entry)
+
 struct rgw_bi_log_entry {
   std::string id;
   std::string object;
