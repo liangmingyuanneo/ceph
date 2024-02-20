@@ -152,7 +152,8 @@ static void bi_reshard_log_key(cls_method_context_t hctx, uint64_t& gen, string&
 }
 
 static int reshard_log_index_operation(cls_method_context_t hctx, string& idx,
-                                       uint64_t gen, cls_rgw_obj_key& key, bufferlist* log_bl)
+                                       uint64_t gen, const cls_rgw_obj_key& key,
+                                       bufferlist* log_bl)
 {
   string reshard_log_idx;
   assert(gen >= 1);
@@ -849,11 +850,18 @@ int rgw_bucket_prepare_op(cls_method_context_t hctx, bufferlist *in, bufferlist 
 	       "INFO: %s: request: op=%s name=%s tag=%s", __func__,
 	       modify_op_str(op.op).c_str(), op.key.to_string().c_str(), op.tag.c_str());
 
+  struct rgw_bucket_dir_header header;
+  int rc = read_bucket_header(hctx, &header);
+  if (rc < 0) {
+    CLS_LOG_BITX(bitx_inst, 1, "ERROR: %s: failed to read header", __func__);
+    return rc;
+  }
+
   // get on-disk state
   std::string idx;
 
   rgw_bucket_dir_entry entry;
-  int rc = read_key_entry(hctx, op.key, &idx, &entry);
+  rc = read_key_entry(hctx, op.key, &idx, &entry);
   if (rc < 0 && rc != -ENOENT) {
     CLS_LOG_BITX(bitx_inst, 1,
 		 "ERROR: %s could not read key entry, key=%s, rc=%d",
@@ -895,6 +903,10 @@ int rgw_bucket_prepare_op(cls_method_context_t hctx, bufferlist *in, bufferlist 
 		 "ERROR: %s could not set value for key, key=%s, rc=%d",
 		 __func__, escape_str(idx).c_str(), rc);
     return rc;
+  }
+  if (header.resharding_in_logrecord()) {
+    // write the duplicated index entry copy with newest gen
+    return reshard_log_index_operation(hctx, idx, header.get_gen(), entry.key, &info_bl);
   }
 
   CLS_LOG_BITX(bitx_inst, 10, "EXITING %s, returning 0", __func__);
@@ -1012,6 +1024,16 @@ static int complete_remove_obj(cls_method_context_t hctx,
           int(entry.meta.category));
   unaccount_entry(header, entry);
 
+  if (header.resharding_in_logrecord()) {
+    bufferlist empty;
+    int rc = reshard_log_index_operation(hctx, idx, header.get_gen(), key, &empty);
+    if (rc < 0) {
+      CLS_LOG(1, "%s: reshard_log_index_operation, failed to update entry, name=%s, rc=%d",
+       __func__, escape_str(idx).c_str(), rc);
+      return rc;
+    }
+  }
+
   ret = cls_cxx_map_remove_key(hctx, idx);
   if (ret < 0) {
     CLS_LOG(1, "%s: cls_cxx_map_remove_key failed with %d", __func__, ret);
@@ -1124,6 +1146,16 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
                        __func__, escape_str(idx).c_str(), rc);
           return rc;
         }
+        if (header.resharding_in_logrecord()) {
+          bufferlist empty;
+          rc = reshard_log_index_operation(hctx, idx, header.get_gen(), entry.key, &empty);
+          if (rc < 0) {
+            CLS_LOG_BITX(bitx_inst, 1,
+            "ERROR: %s: reshard_log_index_operation, failed to update entry, name=%s, rc=%d",
+            __func__, escape_str(idx).c_str(), rc);
+            return rc;
+          }
+        }
       } else {
         // we removed this tag from pending_map so need to write the changes
         CLS_LOG_BITX(bitx_inst, 20,
@@ -1137,6 +1169,15 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
                        "ERROR: %s: unable to set map val, key=%s, rc=%d",
                        __func__, escape_str(idx).c_str(), rc);
           return rc;
+        }
+        if (header.resharding_in_logrecord()) {
+          rc = reshard_log_index_operation(hctx, idx, header.get_gen(), entry.key, &new_key_bl);
+          if (rc < 0) {
+            CLS_LOG_BITX(bitx_inst, 1,
+            "ERROR: %s: reshard_log_index_operation, failed to update entry, name=%s, rc=%d",
+            __func__, escape_str(idx).c_str(), rc);
+            return rc;
+          }
         }
       }
     }
@@ -1166,6 +1207,16 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
 		       __func__, escape_str(idx).c_str(), rc);
         return rc;
       }
+      if (header.resharding_in_logrecord()) {
+        bufferlist empty;
+        rc = reshard_log_index_operation(hctx, idx, header.get_gen(), entry.key, &empty);
+        if (rc < 0) {
+          CLS_LOG_BITX(bitx_inst, 1,
+          "ERROR: %s: reshard_log_index_operation, failed to update entry, name=%s, rc=%d",
+          __func__, escape_str(idx).c_str(), rc);
+          return rc;
+        }
+      }
     } else {
       entry.exists = false;
       bufferlist new_key_bl;
@@ -1179,6 +1230,15 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
 		     "ERROR: %s: unable to set map val, key=%s, rc=%d",
 		     __func__, escape_str(idx).c_str(), rc);
         return rc;
+      }
+      if (header.resharding_in_logrecord()) {
+        rc = reshard_log_index_operation(hctx, idx, header.get_gen(), entry.key, &new_key_bl);
+        if (rc < 0) {
+          CLS_LOG_BITX(bitx_inst, 1,
+          "ERROR: %s: reshard_log_index_operation, failed to update entry, name=%s, rc=%d",
+          __func__, escape_str(idx).c_str(), rc);
+          return rc;
+        }
       }
     }
   } // CLS_RGW_OP_DEL
@@ -1211,6 +1271,15 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
 		   "ERROR: %s: unable to set map value at key=%s, rc=%d",
 		   __func__, escape_str(idx).c_str(), rc);
       return rc;
+    }
+    if (header.resharding_in_logrecord()) {
+      rc = reshard_log_index_operation(hctx, idx, header.get_gen(), entry.key, &new_key_bl);
+      if (rc < 0) {
+        CLS_LOG_BITX(bitx_inst, 1,
+        "ERROR: %s: reshard_log_index_operation, failed to update entry, name=%s, rc=%d",
+        __func__, escape_str(idx).c_str(), rc);
+        return rc;
+      }
     }
   } // CLS_RGW_OP_ADD
 
