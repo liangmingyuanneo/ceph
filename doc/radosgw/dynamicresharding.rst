@@ -63,6 +63,10 @@ Configuration options that control the resharding process:
 
 - ``rgw_reshard_log_max_list_entries``: maximum number of log entries listed in one loop, default: 100
 
+- ``rgw_reshard_progress_judge_interval``: interval of judging if bucket reshard failed in reshard log process state, default: 120 seconds
+
+- ``rgw_reshard_progress_judge_ratio``: ratio of reshard progress judge interval to randomly vary, default: 0.5
+
 Admin commands
 ==============
 
