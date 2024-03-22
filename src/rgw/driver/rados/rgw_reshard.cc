@@ -283,7 +283,7 @@ public:
   }
 
   /* flush entries in dealing with reshard log */
-  int flush_inc() {
+  int flush_inc(RGWBucketReshard *br = nullptr, const DoutPrefixProvider *dpp = nullptr) {
     if (bi_process_log_entries.size() == 0) {
       return 0;
     }
@@ -332,6 +332,13 @@ public:
     }
     bi_process_log_entries.clear();
     stats.clear();
+
+    if (br != nullptr) {
+      ret = br->renew_lock_if_needed(dpp);
+      if (ret < 0) {
+        return ret;
+      }
+    }
     return 0;
   }
 
@@ -423,10 +430,10 @@ public:
     return ret;
   }
 
-  int finish_inc() {
+  int finish_inc(RGWBucketReshard *br = nullptr, const DoutPrefixProvider *dpp = nullptr) {
     int ret = 0;
     for (auto& shard : target_shards) {
-      int r = shard.flush_inc();
+      int r = shard.flush_inc(br, dpp);
       if (r < 0) {
         derr << "ERROR: target_shards[" << shard.get_shard_id() << "].flush() returned error: " << cpp_strerror(-r) << dendl;
         ret = r;
@@ -987,7 +994,7 @@ int RGWBucketReshard::cancel(const DoutPrefixProvider* dpp, optional_yield y)
     return ret;
   }
 
-  if (bucket_info.layout.resharding != rgw::BucketReshardState::InProgress ||
+  if (bucket_info.layout.resharding != rgw::BucketReshardState::InProgress &&
       bucket_info.layout.resharding != rgw::BucketReshardState::InLogrecord) {
     ldpp_dout(dpp, -1) << "ERROR: bucket is not resharding" << dendl;
     ret = -EINVAL;
@@ -1085,6 +1092,48 @@ int RGWBucketReshardLock::renew(const Clock::time_point& now) {
   return 0;
 }
 
+int RGWBucketReshard::renew_lock_if_needed(const DoutPrefixProvider *dpp) {
+  int ret = 0;
+  Clock::time_point now = Clock::now();
+  if (reshard_lock.should_renew(now)) {
+    // assume outer locks have timespans at least the size of ours, so
+    // can call inside conditional
+    if (outer_reshard_lock) {
+      ret = outer_reshard_lock->renew(now);
+      if (ret < 0) {
+        return ret;
+      }
+    }
+    ret = reshard_lock.renew(now);
+    if (ret < 0) {
+      ldpp_dout(dpp, -1) << "Error renewing bucket lock: " << ret << dendl;
+      return ret;
+    }
+  }
+  return 0;
+}
+
+int RGWBucketReshard::calc_target_shard(const RGWBucketInfo& bucket_info, const rgw_obj_key& key,
+                                        int& shard, const DoutPrefixProvider *dpp) {
+  int target_shard_id, ret;
+
+  rgw_obj obj(bucket_info.bucket, key);
+  RGWMPObj mp;
+  if (key.ns == RGW_OBJ_NS_MULTIPART && mp.from_meta(key.name)) {
+    // place the multipart .meta object on the same shard as its head object
+    obj.index_hash_source = mp.get_key();
+  }
+  ret = store->getRados()->get_target_shard_id(bucket_info.layout.target_index->layout.normal,
+                obj.get_hash_object(), &target_shard_id);
+  if (ret < 0) {
+    ldpp_dout(dpp, -1) << "ERROR: get_target_shard_id() returned ret=" << ret << dendl;
+    return ret;
+  }
+  shard = (target_shard_id > 0 ? target_shard_id : 0);
+
+  return 0;
+}
+
 int RGWBucketReshard::reshard_in_logrecord_state(const rgw::bucket_index_layout_generation& current,
                                                 int& max_entries,
                                                 BucketReshardManager& target_shards_mgr,
@@ -1102,6 +1151,7 @@ int RGWBucketReshard::reshard_in_logrecord_state(const rgw::bucket_index_layout_
   uint64_t inventory_entries = 0;
 
   if (!verbose_json_out && out) {
+    (*out) << "inventory start time: " << real_clock::now() << std::endl;
     (*out) << "inventory entries:";
   }
 
@@ -1137,7 +1187,6 @@ int RGWBucketReshard::reshard_in_logrecord_state(const rgw::bucket_index_layout_
 
         marker = entry.idx;
 
-        int target_shard_id;
         cls_rgw_obj_key cls_key;
         RGWObjCategory category;
         rgw_bucket_category_stats stats;
@@ -1150,20 +1199,12 @@ int RGWBucketReshard::reshard_in_logrecord_state(const rgw::bucket_index_layout_
           ldpp_dout(dpp, 10) << "Dropping entry with empty name, idx=" << marker << dendl;
           continue;
         }
-        rgw_obj obj(bucket_info.bucket, key);
-        RGWMPObj mp;
-        if (key.ns == RGW_OBJ_NS_MULTIPART && mp.from_meta(key.name)) {
-          // place the multipart .meta object on the same shard as its head object
-          obj.index_hash_source = mp.get_key();
-        }
-        ret = store->getRados()->get_target_shard_id(bucket_info.layout.target_index->layout.normal,
-                      obj.get_hash_object(), &target_shard_id);
+
+        int shard_index;
+        ret = calc_target_shard(bucket_info, key, shard_index, dpp);
         if (ret < 0) {
-          ldpp_dout(dpp, -1) << "ERROR: get_target_shard_id() returned ret=" << ret << dendl;
           return ret;
         }
-
-        int shard_index = (target_shard_id > 0 ? target_shard_id : 0);
 
         ret = target_shards_mgr.add_entry(shard_index, entry, account,
                   category, stats);
@@ -1171,22 +1212,11 @@ int RGWBucketReshard::reshard_in_logrecord_state(const rgw::bucket_index_layout_
           return ret;
         }
 
-        Clock::time_point now = Clock::now();
-        if (reshard_lock.should_renew(now)) {
-          // assume outer locks have timespans at least the size of ours, so
-          // can call inside conditional
-          if (outer_reshard_lock) {
-            ret = outer_reshard_lock->renew(now);
-            if (ret < 0) {
-              return ret;
-            }
-          }
-          ret = reshard_lock.renew(now);
-          if (ret < 0) {
-            ldpp_dout(dpp, -1) << "Error renewing bucket lock: " << ret << dendl;
-            return ret;
-          }
+        ret = renew_lock_if_needed(dpp);
+        if (ret < 0) {
+          return ret;
         }
+
         if (verbose_json_out) {
           formatter->close_section();
           formatter->flush(*out);
@@ -1209,6 +1239,12 @@ int RGWBucketReshard::reshard_in_logrecord_state(const rgw::bucket_index_layout_
     ldpp_dout(dpp, -1) << "ERROR: failed to reshard: " << ret << dendl;
     return -EIO;
   }
+
+  // should renew lock after finish_inventory
+  ret = renew_lock_if_needed(dpp);
+  if (ret < 0) {
+    return ret;
+  }
   return 0;
 }
 
@@ -1229,6 +1265,7 @@ int RGWBucketReshard::reshard_in_progress_state(const rgw::bucket_index_layout_g
   uint64_t inc_entries = 0;
 
   if (!verbose_json_out && out) {
+    (*out) << "inc start time: " << real_clock::now() << std::endl;
     (*out) << "inc entries:";
   }
 
@@ -1276,13 +1313,12 @@ int RGWBucketReshard::reshard_in_progress_state(const rgw::bucket_index_layout_g
         inc_entries++;
         marker = entry.idx;
 
-        cls_rgw_obj_key cls_key = entry.key;
-        rgw_obj_key key(cls_key);
-        int target_shard_id;
+        cls_rgw_obj_key cls_key;
         RGWObjCategory category;
         rgw_bucket_category_stats stats;
         /* only plain entries account in reshard */
         bool account = entry.get_info(&cls_key, &category, &stats);
+        rgw_obj_key key(cls_key);
         if (entry.type == BIIndexType::OLH && key.empty()) {
           // bogus entry created by https://tracker.ceph.com/issues/46456
           // to fix, skip so it doesn't get include in the new bucket instance
@@ -1290,42 +1326,24 @@ int RGWBucketReshard::reshard_in_progress_state(const rgw::bucket_index_layout_g
           ldpp_dout(dpp, 10) << "Dropping entry with empty name, idx=" << marker << dendl;
           continue;
         }
-        rgw_obj obj(bucket_info.bucket, key);
-        RGWMPObj mp;
-        if (key.ns == RGW_OBJ_NS_MULTIPART && mp.from_meta(key.name)) {
-          // place the multipart .meta object on the same shard as its head object
-          obj.index_hash_source = mp.get_key();
-        }
-        ret = store->getRados()->get_target_shard_id(bucket_info.layout.target_index->layout.normal,
-                      obj.get_hash_object(), &target_shard_id);
+
+        int shard_index = 0;
+        ret = calc_target_shard(bucket_info, key, shard_index, dpp);
         if (ret < 0) {
-          ldpp_dout(dpp, -1) << "ERROR: get_target_shard_id() returned ret=" << ret << dendl;
           return ret;
         }
 
-        int shard_index = (target_shard_id > 0 ? target_shard_id : 0);
         rgw_cls_bi_process_log_entry log_entry(entry.idx, !entry.del, entry);
         ret = target_shards_mgr.add_entry(shard_index, log_entry, account, category, stats);
         if (ret < 0) {
           return ret;
         }
 
-        Clock::time_point now = Clock::now();
-        if (reshard_lock.should_renew(now)) {
-          // assume outer locks have timespans at least the size of ours, so
-          // can call inside conditional
-          if (outer_reshard_lock) {
-            ret = outer_reshard_lock->renew(now);
-            if (ret < 0) {
-              return ret;
-            }
-          }
-          ret = reshard_lock.renew(now);
-          if (ret < 0) {
-            ldpp_dout(dpp, -1) << "Error renewing bucket lock: " << ret << dendl;
-            return ret;
-          }
+        ret = renew_lock_if_needed(dpp);
+        if (ret < 0) {
+          return ret;
         }
+
         if (verbose_json_out) {
           formatter->close_section();
           formatter->flush(*out);
@@ -1341,9 +1359,10 @@ int RGWBucketReshard::reshard_in_progress_state(const rgw::bucket_index_layout_g
     formatter->flush(*out);
   } else if (out) {
     (*out) << " " << inc_entries << std::endl;
+    (*out) << "inc end time: " << real_clock::now() << std::endl;
   }
 
-  ret = target_shards_mgr.finish_inc();
+  ret = target_shards_mgr.finish_inc(this, dpp);
   if (ret < 0) {
     ldpp_dout(dpp, -1) << "ERROR: failed to reshard: " << ret << dendl;
     return -EIO;
