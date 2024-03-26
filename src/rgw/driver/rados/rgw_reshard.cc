@@ -567,6 +567,15 @@ static int init_target_layout(rgw::sal::RadosStore* store,
     store->svc()->bi->clean_index(dpp, bucket_info, target);
     return ret;
   }
+
+  // trim the reshard log entries to guarantee that any existing log entries are cleared,
+  // if there are no reshard log entries, this is a no-op that costs little time
+  ret = store->getRados()->trim_reshard_log_entries(dpp, bucket_info, null_yield);
+  if (ret < 0) {
+    ldpp_dout(dpp, 0) << "ERROR: " << __func__ << " failed to trim reshard log entries: "
+        << cpp_strerror(ret) << dendl;
+    return ret;
+  }
   return 0;
 } // init_target_layout
 
@@ -585,6 +594,13 @@ static int revert_target_layout(rgw::sal::RadosStore* store,
   if (ret < 0) {
     ldpp_dout(dpp, 1) << "WARNING: " << __func__ << " failed to remove "
         "target index with: " << cpp_strerror(ret) << dendl;
+    ret = 0; // non-fatal error
+  }
+  // trim the reshard log entries written in logrecord state
+  ret = store->getRados()->trim_reshard_log_entries(dpp, bucket_info, null_yield);
+  if (ret < 0) {
+    ldpp_dout(dpp, 1) << "WARNING: " << __func__ << " failed to trim "
+        "reshard log entries: " << cpp_strerror(ret) << dendl;
     ret = 0; // non-fatal error
   }
 
