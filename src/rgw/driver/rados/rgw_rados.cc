@@ -9167,7 +9167,8 @@ int RGWRados::bi_put(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj&
 
 int RGWRados::bi_list(const DoutPrefixProvider *dpp, rgw_bucket& bucket,
 		      const string& obj_name_filter, const string& marker, uint32_t max,
-		      list<rgw_cls_bi_entry> *entries, bool *is_truncated, optional_yield y)
+		      list<rgw_cls_bi_entry> *entries, bool *is_truncated,
+		      bool reshardlog, optional_yield y)
 {
   rgw_obj obj(bucket, obj_name_filter);
   BucketShard bs(this);
@@ -9178,7 +9179,7 @@ int RGWRados::bi_list(const DoutPrefixProvider *dpp, rgw_bucket& bucket,
   }
 
   auto& ref = bs.bucket_obj;
-  ret = cls_rgw_bi_list(ref.ioctx, ref.obj.oid, obj_name_filter, marker, max, entries, is_truncated);
+  ret = cls_rgw_bi_list(ref.ioctx, ref.obj.oid, obj_name_filter, marker, max, entries, is_truncated, reshardlog);
   if (ret == -ENOENT) {
     *is_truncated = false;
   }
@@ -9189,10 +9190,10 @@ int RGWRados::bi_list(const DoutPrefixProvider *dpp, rgw_bucket& bucket,
 }
 
 int RGWRados::bi_list(BucketShard& bs, const string& obj_name_filter, const string& marker, uint32_t max,
-		      list<rgw_cls_bi_entry> *entries, bool *is_truncated, optional_yield y)
+		      list<rgw_cls_bi_entry> *entries, bool *is_truncated, bool reshardlog, optional_yield y)
 {
   auto& ref = bs.bucket_obj;
-  int ret = cls_rgw_bi_list(ref.ioctx, ref.obj.oid, obj_name_filter, marker, max, entries, is_truncated);
+  int ret = cls_rgw_bi_list(ref.ioctx, ref.obj.oid, obj_name_filter, marker, max, entries, is_truncated, reshardlog);
   if (ret < 0)
     return ret;
 
@@ -9201,7 +9202,7 @@ int RGWRados::bi_list(BucketShard& bs, const string& obj_name_filter, const stri
 
 int RGWRados::bi_list(const DoutPrefixProvider *dpp,
 		      const RGWBucketInfo& bucket_info, int shard_id, const string& obj_name_filter, const string& marker, uint32_t max,
-		      list<rgw_cls_bi_entry> *entries, bool *is_truncated, optional_yield y)
+		      list<rgw_cls_bi_entry> *entries, bool *is_truncated, bool reshardlog, optional_yield y)
 {
   BucketShard bs(this);
   int ret = bs.init(dpp, bucket_info,
@@ -9212,7 +9213,7 @@ int RGWRados::bi_list(const DoutPrefixProvider *dpp,
     return ret;
   }
 
-  return bi_list(bs, obj_name_filter, marker, max, entries, is_truncated, y);
+  return bi_list(bs, obj_name_filter, marker, max, entries, is_truncated, reshardlog, y);
 }
 
 int RGWRados::bi_remove(const DoutPrefixProvider *dpp, BucketShard& bs)
