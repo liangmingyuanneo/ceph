@@ -480,24 +480,34 @@ struct rgw_cls_bi_entry {
   BIIndexType type;
   std::string idx;
   ceph::buffer::list data;
+  bool del;
+  cls_rgw_obj_key key;
 
-  rgw_cls_bi_entry() : type(BIIndexType::Invalid) {}
+  rgw_cls_bi_entry() : type(BIIndexType::Invalid), del(false) {}
 
   void encode(ceph::buffer::list& bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(2, 1, bl);
     encode(type, bl);
     encode(idx, bl);
     encode(data, bl);
+    encode(del, bl);
+    encode(key, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(ceph::buffer::list::const_iterator& bl) {
-    DECODE_START(1, bl);
+    DECODE_START(2, bl);
     uint8_t c;
     decode(c, bl);
     type = (BIIndexType)c;
     decode(idx, bl);
     decode(data, bl);
+    if (struct_v >= 2) {
+      decode(del, bl);
+      decode(key, bl);
+    } else {
+      del = false;
+    }
     DECODE_FINISH(bl);
   }
 
@@ -508,6 +518,40 @@ struct rgw_cls_bi_entry {
 		rgw_bucket_category_stats *accounted_stats);
 };
 WRITE_CLASS_ENCODER(rgw_cls_bi_entry)
+
+// constructed base on index entry read in processing reshard log
+struct rgw_cls_bi_process_log_entry {
+  std::string idx; // whole name of an omap key
+  bool exists;
+  rgw_cls_bi_entry bi_entry;
+
+  rgw_cls_bi_process_log_entry() : exists(false) {}
+  rgw_cls_bi_process_log_entry(std::string idx) : idx(idx), exists(false) {
+    bi_entry.idx = idx;
+  }
+  rgw_cls_bi_process_log_entry(std::string idx, bool exists, rgw_cls_bi_entry bi_entry) :
+    idx(idx), exists(exists), bi_entry(bi_entry) {}
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(idx, bl);
+    encode(exists, bl);
+    encode(bi_entry, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(idx, bl);
+    decode(exists, bl);
+    decode(bi_entry, bl);
+    DECODE_FINISH(bl);
+  }
+
+  void dump(Formatter *f) const;
+  void decode_json(JSONObj *obj);
+};
+WRITE_CLASS_ENCODER(rgw_cls_bi_process_log_entry)
 
 enum OLHLogOp {
   CLS_RGW_OLH_OP_UNKNOWN         = 0,
@@ -596,7 +640,7 @@ struct rgw_reshard_log_entry {
   cls_rgw_obj_key key;
   bool del;
   ceph::buffer::list data;
-  
+
   rgw_reshard_log_entry() : del(false) {}
 
   void encode(ceph::buffer::list &bl) const {

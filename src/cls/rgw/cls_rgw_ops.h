@@ -756,6 +756,25 @@ struct rgw_cls_bi_put_op {
 };
 WRITE_CLASS_ENCODER(rgw_cls_bi_put_op)
 
+struct rgw_cls_bi_process_log_put_op {
+  rgw_cls_bi_process_log_entry entry;
+
+  rgw_cls_bi_process_log_put_op() {}
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(entry, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(entry, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(rgw_cls_bi_process_log_put_op)
+
 struct rgw_cls_bi_list_op {
   uint32_t max;
   std::string name_filter; // limit result to one object and its instances
@@ -830,6 +849,32 @@ struct rgw_cls_bi_list_ret {
   }
 };
 WRITE_CLASS_ENCODER(rgw_cls_bi_list_ret)
+
+struct cls_rgw_reshard_log_list_op {
+  std::string marker;
+  uint32_t max;
+  uint64_t gen;
+
+  cls_rgw_reshard_log_list_op() : max(0) {}
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(marker, bl);
+    encode(max, bl);
+    encode(gen, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(marker, bl);
+    decode(max, bl);
+    decode(gen, bl);
+    DECODE_FINISH(bl);
+  }
+
+};
+WRITE_CLASS_ENCODER(cls_rgw_reshard_log_list_op)
 
 struct rgw_cls_usage_log_read_op {
   uint64_t start_epoch;

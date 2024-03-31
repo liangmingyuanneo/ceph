@@ -1510,6 +1510,7 @@ public:
   void bi_put(librados::ObjectWriteOperation& op, BucketShard& bs, rgw_cls_bi_entry& entry, optional_yield y);
   int bi_put(BucketShard& bs, rgw_cls_bi_entry& entry, optional_yield y);
   int bi_put(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj& obj, rgw_cls_bi_entry& entry, optional_yield y);
+  void bi_process_log_put(librados::ObjectWriteOperation& op, BucketShard& bs, rgw_cls_bi_process_log_entry& entry, optional_yield y);
   int bi_list(const DoutPrefixProvider *dpp,
 	      const RGWBucketInfo& bucket_info,
 	      int shard_id,
@@ -1522,6 +1523,9 @@ public:
   int bi_list(const DoutPrefixProvider *dpp, rgw_bucket& bucket, const std::string& obj_name, const std::string& marker, uint32_t max,
               std::list<rgw_cls_bi_entry> *entries, bool *is_truncated, optional_yield y);
   int bi_remove(const DoutPrefixProvider *dpp, BucketShard& bs);
+
+  int reshard_log_list(BucketShard& bs, const std::string& marker, uint32_t max, uint64_t gen,
+                       std::list<rgw_cls_bi_entry> *entries, bool *is_truncated, optional_yield y);
 
   int cls_obj_usage_log_add(const DoutPrefixProvider *dpp, const std::string& oid, rgw_usage_log_info& info, optional_yield y);
   int cls_obj_usage_log_read(const DoutPrefixProvider *dpp, const std::string& oid, const std::string& user, const std::string& bucket, uint64_t start_epoch,
