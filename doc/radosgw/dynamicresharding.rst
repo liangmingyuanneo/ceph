@@ -61,6 +61,8 @@ Configuration options that control the resharding process:
 
 - ``rgw_reshard_num_logs``: number of shards for the resharding queue, default: 16
 
+- ``rgw_reshard_log_max_list_entries``: maximum number of log entries listed in one loop, default: 100
+
 Admin commands
 ==============
 
