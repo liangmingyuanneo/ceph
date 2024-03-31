@@ -118,6 +118,20 @@ static bool bi_entry_gt(const string& first, const string& second)
   return first > second;
 }
 
+/**
+ * return: Plain, Instance, OLH or Invalid
+ */
+BIIndexType bi_type(const string& s, const string& prefix)
+{
+  int ret = bi_entry_type(s.substr(prefix.size()));
+  if (ret < 0) {
+    return BIIndexType::Invalid;
+  } else if (ret == 0) {
+    return BIIndexType::Plain;
+  }
+  return (BIIndexType)ret;
+}
+
 static void get_time_key(real_time& ut, string *key)
 {
   char buf[32];
@@ -2861,6 +2875,44 @@ static int rgw_bi_put_op(cls_method_context_t hctx, bufferlist *in, bufferlist *
   return 0;
 }
 
+/* put the index entry generated in processing reshard log to new shard */
+static int rgw_bi_process_log_put_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  // decode request
+  rgw_cls_bi_process_log_put_op op;
+  auto iter = in->cbegin();
+  try {
+    decode(op, iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(0, "ERROR: %s(): failed to decode request", __func__);
+    return -EINVAL;
+  }
+
+  struct rgw_bucket_dir_header header;
+  int rc = read_bucket_header(hctx, &header);
+  if (rc < 0) {
+    CLS_LOG(1, "ERROR: rgw_bucket_complete_op(): failed to read header\n");
+    return -EINVAL;
+  }
+
+  rgw_cls_bi_process_log_entry& ori_entry = op.entry;
+  if (ori_entry.exists) {
+
+    int r = cls_cxx_map_set_val(hctx, ori_entry.bi_entry.idx, &ori_entry.bi_entry.data);
+    if (r < 0) {
+      CLS_LOG(0, "ERROR: %s(): cls_cxx_map_set_val() returned r=%d", __func__, r);
+    }
+
+  } else {
+
+    int r = cls_cxx_map_remove_key(hctx, ori_entry.idx);
+    if (r < 0) {
+      CLS_LOG(0, "ERROR: %s(): cls_cxx_map_remove_key() returned r=%d", __func__, r);
+    }
+  }
+
+  return write_bucket_header(hctx, &header);
+}
 
 /* The plain entries in the bucket index are divided into two regions
  * divided by the special entries that begin with 0x80. Those below
@@ -3693,6 +3745,94 @@ static int rgw_bi_log_stop(cls_method_context_t hctx, bufferlist *in, bufferlist
   return write_bucket_header(hctx, &header);
 }
 
+int reshard_log_record_decode(bufferlist& bl, rgw_reshard_log_entry& e)
+{
+  auto iter = bl.cbegin();
+  try {
+    decode(e, iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(0, "ERROR: failed to decode rgw_reshard_log_entry");
+    return -EIO;
+  }
+  return 0;
+}
+
+static int reshard_log_list_entries(cls_method_context_t hctx, const string& marker,
+                                    uint64_t gen, uint32_t max,
+                                    list<rgw_cls_bi_entry>& entries, bool *truncated)
+{
+  string start_key, end_key;
+  start_key = BI_PREFIX_CHAR;
+  start_key.append(bucket_index_prefixes[BI_BUCKET_RESHARD_LOG_INDEX]);
+
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%llu_", (unsigned long long)gen);
+  start_key.append(buf);
+  string bi_type_marker = start_key;
+
+  end_key = BI_PREFIX_CHAR;
+  end_key.append(bucket_index_prefixes[BI_BUCKET_RESHARD_LOG_INDEX + 1]);
+
+  if (!marker.empty()) {
+    start_key.append(marker);
+  }
+
+  map<string, bufferlist> keys;
+  int ret = cls_cxx_map_get_vals(hctx, start_key, string(), max, &keys, truncated);
+  CLS_LOG(20, "%s(): start_key=%s keys.size()=%d", __func__, escape_str(start_key).c_str(), (int)keys.size());
+  if (ret < 0) {
+    return ret;
+  }
+
+  map<string, bufferlist>::iterator iter;
+  for (iter = keys.begin(); iter != keys.end(); ++iter) {
+    if (iter->first.compare(end_key) >= 0) {
+      if (truncated) {
+        *truncated = false;
+      }
+      return 0;
+    }
+
+    rgw_reshard_log_entry e;
+    ret = reshard_log_record_decode(iter->second, e);
+    if (ret < 0)
+      return ret;
+
+    rgw_cls_bi_entry entry;
+    entry.idx = iter->first.substr(bi_type_marker.length());
+    entry.type = bi_type(iter->first, bi_type_marker);
+    entry.data = e.data;
+    entry.del = e.del;
+    entry.key = e.key;
+
+    CLS_LOG(20, "reshard_log_list_entries key=%s bl.length=%d\n", entry.idx.c_str(), (int)iter->second.length());
+
+    entries.push_back(entry);
+  }
+  return 0;
+}
+
+static int rgw_reshard_log_list_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  // decode request
+  cls_rgw_reshard_log_list_op op;
+  auto iter = in->cbegin();
+  try {
+    decode(op, iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(0, "ERROR: %s(): failed to decode request", __func__);
+    return -EINVAL;
+  }
+
+  rgw_cls_bi_list_ret op_ret;
+  int ret = reshard_log_list_entries(hctx, op.marker, op.gen, op.max, op_ret.entries, &op_ret.is_truncated);
+  if (ret < 0)
+    return ret;
+
+  encode(op_ret, *out);
+
+  return 0;
+}
 
 static void usage_record_prefix_by_time(uint64_t epoch, string& key)
 {
@@ -4785,7 +4925,7 @@ static int rgw_guard_bucket_resharding(cls_method_context_t hctx, bufferlist *in
     return rc;
   }
 
-  if (header.resharding()) {
+  if (header.resharding_in_progress()) {
     return op.ret_err;
   }
 
@@ -4845,7 +4985,9 @@ CLS_INIT(rgw)
   cls_method_handle_t h_rgw_obj_check_mtime;
   cls_method_handle_t h_rgw_bi_get_op;
   cls_method_handle_t h_rgw_bi_put_op;
+  cls_method_handle_t h_rgw_bi_process_log_put_op;
   cls_method_handle_t h_rgw_bi_list_op;
+  cls_method_handle_t h_rgw_reshard_log_list_op;
   cls_method_handle_t h_rgw_bi_log_list_op;
   cls_method_handle_t h_rgw_bi_log_trim_op;
   cls_method_handle_t h_rgw_bi_log_resync_op;
@@ -4900,7 +5042,9 @@ CLS_INIT(rgw)
 
   cls_register_cxx_method(h_class, RGW_BI_GET, CLS_METHOD_RD, rgw_bi_get_op, &h_rgw_bi_get_op);
   cls_register_cxx_method(h_class, RGW_BI_PUT, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bi_put_op, &h_rgw_bi_put_op);
+  cls_register_cxx_method(h_class, RGW_BI_PROCESS_LOG_PUT, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bi_process_log_put_op, &h_rgw_bi_process_log_put_op);
   cls_register_cxx_method(h_class, RGW_BI_LIST, CLS_METHOD_RD, rgw_bi_list_op, &h_rgw_bi_list_op);
+  cls_register_cxx_method(h_class, RGW_RESHARD_LOG_LIST, CLS_METHOD_RD, rgw_reshard_log_list_op, &h_rgw_reshard_log_list_op);
 
   cls_register_cxx_method(h_class, RGW_BI_LOG_LIST, CLS_METHOD_RD, rgw_bi_log_list, &h_rgw_bi_log_list_op);
   cls_register_cxx_method(h_class, RGW_BI_LOG_TRIM, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bi_log_trim, &h_rgw_bi_log_trim_op);
