@@ -441,6 +441,7 @@ class AsioFrontend {
 
   std::atomic<bool> going_down{false};
 
+  RGWAsioBackoff backoff;
   CephContext* ctx() const { return cct.get(); }
   std::optional<dmc::ClientCounters> client_counters;
   std::unique_ptr<dmc::ClientConfig> client_config;
@@ -1025,9 +1026,21 @@ void AsioFrontend::accept(Listener& l, boost::asio::yield_context yield)
       return;
     } else if (ec) {
       ldout(ctx(), 1) << "accept failed: " << ec.message() << dendl;
-      return;
+      backoff.backoff_sleep();
+      if (ec == boost::system::errc::too_many_files_open ||
+          ec == boost::system::errc::too_many_files_open_in_system ||
+          ec == boost::system::errc::no_buffer_space ||
+          ec == boost::system::errc::not_enough_memory) {
+        // always retry accept() if we hit a resource limit
+        continue;
+      }
+      if (backoff.is_backoff_done()) {
+        ldout(ctx(), 0) << "accept stopped due to error: " << ec.message() << dendl;
+        return;
+      }
     }
 
+    backoff.reset();
     on_accept(l, std::move(l.socket));
   }
 }
@@ -1162,6 +1175,23 @@ void AsioFrontend::unpause()
 }
 
 } // anonymous namespace
+
+void RGWAsioBackoff::update_wait_time()
+{
+  if (cur_wait < max_msecs) {
+    cur_wait = cur_wait << 1;
+  }
+  if (cur_wait > max_msecs) {
+    cur_wait = max_msecs;
+  }
+}
+
+void RGWAsioBackoff::backoff_sleep()
+{
+  update_wait_time();
+  std::this_thread::sleep_for(std::chrono::milliseconds(cur_wait));
+  try_cnt++;
+}
 
 class RGWAsioFrontend::Impl : public AsioFrontend {
  public:
