@@ -130,6 +130,12 @@ using ceph::crypto::MD5;
 
 #define RGW_ATTR_APPEND_PART_NUM    RGW_ATTR_PREFIX "append_part_num"
 
+/* Attrs to store cloudtier config information. These are used internally
+ * for the replication of cloudtiered objects but not stored as xattrs in
+ * the head object. */
+#define RGW_ATTR_CLOUD_TIER_TYPE    RGW_ATTR_PREFIX "cloud_tier_type"
+#define RGW_ATTR_CLOUD_TIER_CONFIG    RGW_ATTR_PREFIX "cloud_tier_config"
+
 /* IAM Policy */
 #define RGW_ATTR_IAM_POLICY	RGW_ATTR_PREFIX "iam-policy"
 #define RGW_ATTR_USER_POLICY    RGW_ATTR_PREFIX "user-policy"
@@ -266,6 +272,7 @@ using ceph::crypto::MD5;
 #define ERR_OBJECT_NOT_APPENDABLE                        2220
 #define ERR_INVALID_BUCKET_STATE                         2221
 #define ERR_INVALID_OBJECT_STATE			 2222
+#define ERR_PRESIGNED_URL_DISABLED     2223
 
 #define ERR_BUSY_RESHARDING      2300
 #define ERR_NO_SUCH_ENTITY       2301
@@ -941,7 +948,7 @@ struct req_info {
 
   req_info(CephContext *cct, const RGWEnv *env);
   void rebuild_from(req_info& src);
-  void init_meta_info(const DoutPrefixProvider *dpp, bool *found_bad_meta);
+  void init_meta_info(const DoutPrefixProvider *dpp, bool *found_bad_meta, const int prot_flags);
 };
 
 struct req_init_state {
@@ -1614,11 +1621,11 @@ static constexpr uint32_t MATCH_POLICY_RESOURCE = 0x02;
 static constexpr uint32_t MATCH_POLICY_ARN = 0x04;
 static constexpr uint32_t MATCH_POLICY_STRING = 0x08;
 
-extern bool match_policy(std::string_view pattern, std::string_view input,
+extern bool match_policy(const std::string& pattern, const std::string& input,
                          uint32_t flag);
 
-extern std::string camelcase_dash_http_attr(const std::string& orig);
-extern std::string lowercase_dash_http_attr(const std::string& orig);
+extern std::string camelcase_dash_http_attr(const std::string& orig, bool convert2dash = true);
+extern std::string lowercase_dash_http_attr(const std::string& orig, bool bidirection = false);
 
 void rgw_setup_saved_curl_handles();
 void rgw_release_all_curl_handles();

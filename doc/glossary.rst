@@ -42,6 +42,11 @@
                 Ceph is a distributed network storage and file system with
                 distributed metadata management and POSIX semantics.
 
+        `ceph-ansible <https://docs.ceph.com/projects/ceph-ansible/en/latest/index.html>`_
+                A GitHub repository, supported from the Jewel release to the
+                Quincy release, that facilitates the installation of a Ceph
+                cluster.
+                
 	Ceph Block Device
                 A software instrument that orchestrates the storage of
                 block-based data in Ceph. Ceph Block Device (also called "RBD",
@@ -89,6 +94,11 @@
                 POSIX-compliant file system built on top of Ceph’s distributed
                 object store, RADOS.  See :ref:`CephFS Architecture
                 <arch-cephfs>` for more details.
+
+        :ref:`ceph-fuse <man-ceph-fuse>`
+                :ref:`ceph-fuse <man-ceph-fuse>` is a FUSE ("**F**\ilesystem in
+                **USE**\rspace") client for CephFS. ceph-fuse mounts a Ceph FS
+                ata  specified mount point. 
 
 	Ceph Interim Release
                 See :term:`Releases`.
@@ -313,6 +323,12 @@
 	Node
                 See :term:`Ceph Node`.
 
+	Object Storage
+                Object storage is one of three kinds of storage relevant to
+                Ceph. The other two kinds of storage relevant to Ceph are file
+                storage and block storage. Object storage is the category of
+                storage most fundamental to Ceph.
+
 	Object Storage Device
                 See :term:`OSD`.
 
@@ -328,6 +344,14 @@
                 using Ceph
                 <https://ceph.io/assets/pdfs/CawthonKeyValueStore.pdf>`_ (17
                 pages).
+
+        OpenStack Swift
+                In the context of Ceph, OpenStack Swift is one of the two APIs
+                supported by the Ceph Object Store. The other API supported by
+                the Ceph Object Store is S3.
+
+                See `the OpenStack Storage API overview page
+                <https://docs.openstack.org/swift/latest/api/object_api_v1_overview.html>`_.
 
 	OSD
                 Probably :term:`Ceph OSD`, but not necessarily. Sometimes
@@ -386,6 +410,12 @@
                 OSD") in an acting set. Primary affinity was introduced in
                 Firefly (v. 0.80). See :ref:`Primary Affinity
                 <rados_ops_primary_affinity>`.
+
+        :ref:`Prometheus <mgr-prometheus>`
+                An open-source monitoring and alerting toolkit. Ceph offers a
+                :ref:`"Prometheus module" <mgr-prometheus>`, which provides a
+                Prometheus exporter that passes performance counters from a
+                collection point in ``ceph-mgr`` to Prometheus.
 
         Quorum	
                 Quorum is the state that exists when a majority of the
@@ -455,6 +485,14 @@
                 Amazon S3 RESTful API and the OpenStack Swift API. Also called
                 "RADOS Gateway" and "Ceph Object Gateway".
 
+        S3
+                In the context of Ceph, S3 is one of the two APIs supported by
+                the Ceph Object Store. The other API supported by the Ceph
+                Object Store is OpenStack Swift.
+
+                See `the Amazon S3 overview page
+                <https://aws.amazon.com/s3/>`_.
+
         scrubs
 
                 The processes by which Ceph ensures data integrity. During the
@@ -490,6 +528,9 @@
                 A systemd ``type`` where a command is defined in ``ExecStart``
                 which will exit upon completion (it is not intended to
                 daemonize)
+
+        Swift
+                See :term:`OpenStack Swift`.
 
 	Teuthology
 		The collection of software that performs scripted tests on Ceph.

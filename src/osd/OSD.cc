@@ -529,6 +529,15 @@ void OSDService::shutdown()
   next_osdmap = OSDMapRef();
 }
 
+void OSDService::fast_shutdown()
+{
+  mono_timer.suspend();
+  {
+    std::lock_guard l(watch_lock);
+    watch_timer.shutdown();
+  }
+}
+
 void OSDService::init()
 {
   reserver_finisher.start();
@@ -2933,15 +2942,22 @@ will start to track new ops received afterwards.";
   } else if (prefix == "compact") {
     dout(1) << "triggering manual compaction" << dendl;
     auto start = ceph::coarse_mono_clock::now();
-    store->compact();
-    auto end = ceph::coarse_mono_clock::now();
-    double duration = std::chrono::duration<double>(end-start).count();
-    dout(1) << "finished manual compaction in "
-            << duration
-            << " seconds" << dendl;
-    f->open_object_section("compact_result");
-    f->dump_float("elapsed_time", duration);
-    f->close_section();
+    int r = store->compact();
+    if (r == 0) {
+      auto end = ceph::coarse_mono_clock::now();
+      double duration = std::chrono::duration<double>(end-start).count();
+
+      dout(1) << "finished manual compaction in "
+              << duration
+              << " seconds" << dendl;
+      f->open_object_section("compact_result");
+      f->dump_float("elapsed_time", duration);
+      f->close_section();
+    } else  if ( r == -EINPROGRESS) {
+      dout(1) << "manual compaction is being executed asynchronously" << dendl;
+    } else {
+      derr << "error starting manual compaction:" << cpp_strerror(r) << dendl;
+    }
   } else if (prefix == "get_mapped_pools") {
     f->open_array_section("mapped_pools");
     set<int64_t> poollist = get_mapped_pools();
@@ -3837,7 +3853,7 @@ int OSD::init()
   dout(2) << "superblock: I am osd." << superblock.whoami << dendl;
 
   if (cct->_conf.get_val<bool>("osd_compact_on_start")) {
-    dout(2) << "compacting object store's omap" << dendl;
+    dout(2) << "compacting object store's DB" << dendl;
     store->compact();
   }
 
@@ -4497,6 +4513,7 @@ int OSD::shutdown()
 
     utime_t  start_time_umount = ceph_clock_now();
     store->prepare_for_fast_shutdown();
+    service.fast_shutdown();
     std::lock_guard lock(osd_lock);
     // TBD: assert in allocator that nothing is being add
     store->umount();

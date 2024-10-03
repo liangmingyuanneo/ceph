@@ -301,6 +301,9 @@ int RGWGetObj_ObjStore_S3::get_params(optional_yield y)
     skip_decrypt = s->info.args.exists(RGW_SYS_PARAM_PREFIX "skip-decrypt");
   }
 
+  // multisite sync requests should fetch cloudtiered objects
+  sync_cloudtiered = s->info.args.exists(RGW_SYS_PARAM_PREFIX "sync-cloudtiered");
+
   return RGWGetObj_ObjStore::get_params(y);
 }
 
@@ -2308,11 +2311,12 @@ static void dump_bucket_metadata(struct req_state *s, rgw::sal::Bucket* bucket)
   // only bucket's owner is allowed to get the quota settings of the account
   if (bucket->is_owner(s->user.get())) {
     auto user_info = s->user->get_info();
+    auto bucket_quota = s->bucket->get_info().quota; // bucket quota
     dump_header(s, "X-RGW-Quota-User-Size", static_cast<long long>(user_info.user_quota.max_size));
     dump_header(s, "X-RGW-Quota-User-Objects", static_cast<long long>(user_info.user_quota.max_objects));
     dump_header(s, "X-RGW-Quota-Max-Buckets", static_cast<long long>(user_info.max_buckets));
-    dump_header(s, "X-RGW-Quota-Bucket-Size", static_cast<long long>(user_info.bucket_quota.max_size));
-    dump_header(s, "X-RGW-Quota-Bucket-Objects", static_cast<long long>(user_info.bucket_quota.max_objects));
+    dump_header(s, "X-RGW-Quota-Bucket-Size", static_cast<long long>(bucket_quota.max_size));
+    dump_header(s, "X-RGW-Quota-Bucket-Objects", static_cast<long long>(bucket_quota.max_objects));
   }
 }
 
@@ -2516,8 +2520,15 @@ static inline void map_qs_metadata(struct req_state* s, bool crypto_too)
 
 int RGWPutObj_ObjStore_S3::get_params(optional_yield y)
 {
-  if (!s->length)
-    return -ERR_LENGTH_REQUIRED;
+  if (!s->length) {
+    const char *encoding = s->info.env->get("HTTP_TRANSFER_ENCODING");
+    if (!encoding || strcmp(encoding, "chunked") != 0) {
+      ldout(s->cct, 20) << "neither length nor chunked encoding" << dendl;
+      return -ERR_LENGTH_REQUIRED;
+    }
+
+    chunked_upload = true;
+  }
 
   int ret;
 
@@ -3431,10 +3442,10 @@ int RGWCopyObj_ObjStore_S3::get_params(optional_yield y)
     obj_legal_hold = new RGWObjectLegalHold(obj_legal_hold_str);
   }
 
-  if_mod = s->info.env->get("HTTP_X_AMZ_COPY_IF_MODIFIED_SINCE");
-  if_unmod = s->info.env->get("HTTP_X_AMZ_COPY_IF_UNMODIFIED_SINCE");
-  if_match = s->info.env->get("HTTP_X_AMZ_COPY_IF_MATCH");
-  if_nomatch = s->info.env->get("HTTP_X_AMZ_COPY_IF_NONE_MATCH");
+  if_mod = s->info.env->get("HTTP_X_AMZ_COPY_SOURCE_IF_MODIFIED_SINCE");
+  if_unmod = s->info.env->get("HTTP_X_AMZ_COPY_SOURCE_IF_UNMODIFIED_SINCE");
+  if_match = s->info.env->get("HTTP_X_AMZ_COPY_SOURCE_IF_MATCH");
+  if_nomatch = s->info.env->get("HTTP_X_AMZ_COPY_SOURCE_IF_NONE_MATCH");
 
   src_tenant_name = s->src_tenant_name;
   src_bucket_name = s->src_bucket_name;
@@ -5453,6 +5464,11 @@ AWSGeneralAbstractor::get_auth_data(const req_state* const s) const
   AwsRoute route;
   std::tie(version, route) = discover_aws_flavour(s->info);
 
+  if (s->cct->_conf->rgw_s3_auth_disable_signature_url) {
+    ldpp_dout(s, 10) << "Presigned URLs are disabled by admin" << dendl;
+    throw -ERR_PRESIGNED_URL_DISABLED;
+  }
+  
   if (version == AwsVersion::V2) {
     return get_auth_data_v2(s);
   } else if (version == AwsVersion::V4) {
@@ -5461,6 +5477,7 @@ AWSGeneralAbstractor::get_auth_data(const req_state* const s) const
     /* FIXME(rzarzynski): handle anon user. */
     throw -EINVAL;
   }
+
 }
 
 boost::optional<std::string>
@@ -5692,6 +5709,19 @@ AWSGeneralAbstractor::get_auth_data_v4(const req_state* const s,
                                      std::placeholders::_2,
                                      std::placeholders::_3,
                                      s);
+
+  // some ops don't expect a request body at all, so never call complete() to
+  // validate the payload hash. check empty signed payloads now and return a
+  // null completer below
+  constexpr std::string_view empty_sha256sum = // echo -n | sha256sum
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+  if (is_v4_payload_empty(s) &&
+      !is_v4_payload_unsigned(exp_payload_hash) &&
+      exp_payload_hash != empty_sha256sum) {
+    ldpp_dout(s, 4) << "ERROR: empty payload checksum mismatch, expected "
+        << empty_sha256sum << " got " << exp_payload_hash << dendl;
+    throw -ERR_AMZ_CONTENT_SHA256_MISMATCH;
+  }
 
   /* Requests authenticated with the Query Parameters are treated as unsigned.
    * From "Authenticating Requests: Using Query Parameters (AWS Signature
@@ -6132,7 +6162,7 @@ rgw::auth::s3::LocalEngine::authenticate(
   if (store->get_user_by_access_key(dpp, access_key_id, y, &user) < 0) {
       ldpp_dout(dpp, 5) << "error reading user info, uid=" << access_key_id
               << " can't authenticate" << dendl;
-      return result_t::deny(-ERR_INVALID_ACCESS_KEY);
+      return result_t::reject(-ERR_INVALID_ACCESS_KEY);
   }
   //TODO: Uncomment, when we have a migration plan in place.
   /*else {
@@ -6146,7 +6176,7 @@ rgw::auth::s3::LocalEngine::authenticate(
   const auto iter = user->get_info().access_keys.find(access_key_id);
   if (iter == std::end(user->get_info().access_keys)) {
     ldpp_dout(dpp, 0) << "ERROR: access key not encoded in user info" << dendl;
-    return result_t::deny(-EPERM);
+    return result_t::reject(-EPERM);
   }
   const RGWAccessKey& k = iter->second;
 
@@ -6162,7 +6192,7 @@ rgw::auth::s3::LocalEngine::authenticate(
   ldpp_dout(dpp, 15) << "compare=" << compare << dendl;
 
   if (compare != 0) {
-    return result_t::deny(-ERR_SIGNATURE_NO_MATCH);
+    return result_t::reject(-ERR_SIGNATURE_NO_MATCH);
   }
 
   auto apl = apl_factory->create_apl_local(cct, s, user->get_info(),

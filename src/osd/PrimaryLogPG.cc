@@ -4309,8 +4309,11 @@ void PrimaryLogPG::execute_ctx(OpContext *ctx)
     }
     reply->add_flags(CEPH_OSD_FLAG_ACK | CEPH_OSD_FLAG_ONDISK);
     // append to pg log for dup detection - don't save buffers for now
-    record_write_error(op, soid, reply, result,
-		       ctx->op->allows_returnvec() ? ctx : nullptr);
+    // store op's returnvec unconditionally-on-errors to ensure coherency
+    // with the original request handling (see `ignore_out_data` above).
+    record_write_error(
+      op, soid, reply, result,
+      (ctx->op->allows_returnvec() || result < 0) ? ctx : nullptr);
     close_op_ctx(ctx);
     return;
   }
@@ -8770,15 +8773,14 @@ void PrimaryLogPG::do_osd_op_effects(OpContext *ctx, const ConnectionRef& conn)
   ceph_assert(conn);
 
   auto session = conn->get_priv();
-  if (!session)
-    return;
 
   for (list<pair<watch_info_t,bool> >::iterator i = ctx->watch_connects.begin();
        i != ctx->watch_connects.end();
        ++i) {
     pair<uint64_t, entity_name_t> watcher(i->first.cookie, entity);
     dout(15) << "do_osd_op_effects applying watch connect on session "
-	     << session.get() << " watcher " << watcher << dendl;
+	     << (session ? session.get() : nullptr) << " watcher " << watcher
+	     << dendl;
     WatchRef watch;
     if (ctx->obc->watchers.count(watcher)) {
       dout(15) << "do_osd_op_effects found existing watch watcher " << watcher
@@ -8802,7 +8804,6 @@ void PrimaryLogPG::do_osd_op_effects(OpContext *ctx, const ConnectionRef& conn)
        p != ctx->notifies.end();
        ++p) {
     dout(10) << "do_osd_op_effects, notify " << *p << dendl;
-    ConnectionRef conn(ctx->op->get_req()->get_connection());
     NotifyRef notif(
       Notify::makeNotifyRef(
 	conn,

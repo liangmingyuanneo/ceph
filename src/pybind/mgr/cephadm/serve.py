@@ -64,7 +64,6 @@ class CephadmServe:
         of cephadm. This loop will then attempt to apply this new state.
         """
         self.log.debug("serve starting")
-        self.mgr.config_checker.load_network_config()
 
         while self.mgr.run:
             self.log.debug("serve loop start")
@@ -277,7 +276,9 @@ class CephadmServe:
 
         self.mgr.agent_helpers._update_agent_down_healthcheck(agents_down)
 
-        self.mgr.config_checker.run_checks()
+        if self.mgr.config_checks_enabled:
+            self.mgr.config_checker.load_network_config()
+            self.mgr.config_checker.run_checks()
 
         for k in [
                 'CEPHADM_HOST_CHECK_FAILED',
@@ -293,6 +294,7 @@ class CephadmServe:
         self.mgr.update_failed_daemon_health_check()
 
     def _check_host(self, host: str) -> Optional[str]:
+        print('this is not possible')
         if host not in self.mgr.inventory:
             return None
         self.log.debug(' checking %s' % host)
@@ -926,9 +928,11 @@ class CephadmServe:
                 hosts_altered.add(d.hostname)
                 self.mgr.spec_store.mark_needs_configuration(spec.service_name())
 
-            self.mgr.remote('progress', 'complete', progress_id)
+            if progress_total:
+                self.mgr.remote('progress', 'complete', progress_id)
         except Exception as e:
-            self.mgr.remote('progress', 'fail', progress_id, str(e))
+            if progress_total:
+                self.mgr.remote('progress', 'fail', progress_id, str(e))
             raise
         finally:
             if self.mgr.spec_store.needs_configuration(spec.service_name()):
@@ -1155,11 +1159,12 @@ class CephadmServe:
                     if host not in client_files:
                         client_files[host] = {}
                     ceph_conf = (0o644, 0, 0, bytes(config), str(config_digest))
-                    client_files[host]['/etc/ceph/ceph.conf'] = ceph_conf
-                    client_files[host][f'{cluster_cfg_dir}/ceph.conf'] = ceph_conf
-                    ceph_admin_key = (ks.mode, ks.uid, ks.gid, keyring.encode('utf-8'), digest)
-                    client_files[host][ks.path] = ceph_admin_key
-                    client_files[host][f'{cluster_cfg_dir}/{os.path.basename(ks.path)}'] = ceph_admin_key
+                    if ks.include_ceph_conf:
+                        client_files[host]['/etc/ceph/ceph.conf'] = ceph_conf
+                        client_files[host][f'{cluster_cfg_dir}/ceph.conf'] = ceph_conf
+                    client_key = (ks.mode, ks.uid, ks.gid, keyring.encode('utf-8'), digest)
+                    client_files[host][ks.path] = client_key
+                    client_files[host][f'{cluster_cfg_dir}/{os.path.basename(ks.path)}'] = client_key
             except Exception as e:
                 self.log.warning(
                     f'unable to calc client keyring {ks.entity} placement {ks.placement}: {e}')
@@ -1222,6 +1227,7 @@ class CephadmServe:
                 image = ''
                 start_time = datetime_now()
                 ports: List[int] = daemon_spec.ports if daemon_spec.ports else []
+                port_ips: Dict[str, str] = daemon_spec.port_ips if daemon_spec.port_ips else {}
 
                 if daemon_spec.daemon_type == 'container':
                     spec = cast(CustomContainerSpec,
@@ -1234,6 +1240,11 @@ class CephadmServe:
                 if len(ports) > 0:
                     daemon_spec.extra_args.extend([
                         '--tcp-ports', ' '.join(map(str, ports))
+                    ])
+
+                if port_ips:
+                    daemon_spec.extra_args.extend([
+                        '--port-ips', json.dumps(port_ips)
                     ])
 
                 # osd deployments needs an --osd-uuid arg
